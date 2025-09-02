@@ -22,6 +22,8 @@ from repositories import (
     list_distinct_teachers,
     set_zoom_link,
     zoom_for_event,
+    events_for_user_day,
+    events_for_user_range
 )
 
 router = Router(name="commands")
@@ -35,22 +37,15 @@ DEFAULT_HELP_TEXT = (
 
 def _read_help_md() -> str:
     candidates: list[Path] = []
-
-    # 1) Поруч із виконуваним файлом (exe / onedir)
     if getattr(sys, "frozen", False):
         candidates.append(Path(sys.executable).parent / "help.md")
-
-    # 2) Запуск із сорсів: шукаємо help.md у батьківських теках (до 3 рівнів)
     here = Path(__file__).resolve()
     for _ in range(3):
         here = here.parent
         candidates.append(here / "help.md")
-
-    # 3) (опційно) PyInstaller onefile MEIPASS
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         candidates.append(Path(meipass) / "help.md")
-
     for p in candidates:
         try:
             return p.read_text(encoding="utf-8")
@@ -62,15 +57,12 @@ def _read_help_md() -> str:
 async def help_cmd(message: Message):
     text = _read_help_md()
     try:
-        await message.answer(text, parse_mode=ParseMode.MARKDOWN)  # legacy MD — без строгого екранування
+        await message.answer(text, parse_mode=ParseMode.MARKDOWN)
     except Exception:
         await message.answer(text)
 
 # ---------- утиліти форматування ----------
 def _subject_display(e: TimetableEvent) -> str:
-    """
-    "АБРЕВІАТУРА Повна назва" якщо є обидва, інакше те, що є.
-    """
     code = (e.subject_code or "").strip()
     full = (e.subject_full or "").strip()
     if code and full:
@@ -78,27 +70,23 @@ def _subject_display(e: TimetableEvent) -> str:
     return full or code or "Предмет"
 
 def _teacher_display(e: TimetableEvent) -> str | None:
-    """
-    Повертає ПІБ викладача повністю, а якщо його немає — скорочений варіант.
-    """
     return (e.teacher_full or e.teacher_short or "").strip() or None
+
+def _groups_display(e: TimetableEvent) -> str | None:
+    return (e.groups_text or "").strip() or None
 
 # ---------- Добові відповіді ----------
 async def _send_day(message: Message, day_offset: int):
     sm = get_sessionmaker()
     async with sm() as s:
         u = await s.scalar(select(User).where(User.user_id == message.from_user.id))
-        if not u or not u.group_id:
-            await message.answer("Немає групи. Натисніть /start.")
+        if not u or (u.role == "student" and not u.group_id) or (u.role == "teacher" and not u.teacher_id):
+            await message.answer("Немає налаштованої групи/викладача. Натисніть /start.")
             return
+
         from datetime import timedelta
         target = today_kiev().date() + timedelta(days=day_offset)
-        rows = list((await s.execute(
-            select(TimetableEvent).where(
-                (TimetableEvent.group_id == u.group_id) &
-                (TimetableEvent.date == target)
-            ).order_by(TimetableEvent.time_start, TimetableEvent.lesson_number)
-        )).scalars())
+        rows = await events_for_user_day(s, u, target)
 
         if not rows:
             when = "сьогодні" if day_offset == 0 else "завтра" if day_offset == 1 else str(target)
@@ -116,11 +104,21 @@ async def _send_day(message: Message, day_offset: int):
             subj = _subject_display(e)
             lt = f" ({e.lesson_type})" if e.lesson_type else ""
             room = f", ауд. {e.auditory}" if e.auditory else ""
-            teacher = _teacher_display(e)
-            teach = f"\nВикл.: {teacher}" if teacher else ""
+
+            # Відмінності за роллю
+            extra = ""
+            if u.role == "teacher":
+                groups = _groups_display(e)
+                if groups:
+                    extra += f"\nГрупи: {groups}"
+            else:
+                teacher = _teacher_display(e)
+                if teacher:
+                    extra += f"\nВикл.: {teacher}"
+
             zoom = await zoom_for_event(s, e)
             zoom_line = f"\nZoom: {zoom}" if zoom else ""
-            b.add(f"• {t} — ").add_bold(subj).add(f"{lt}{room}{teach}{zoom_line}").newline()
+            b.add(f"• {t} — ").add_bold(subj).add(f"{lt}{room}{extra}{zoom_line}").newline()
 
     text, entities = b.build()
     await message.answer(text, entities=entities)
@@ -138,21 +136,15 @@ async def week(message: Message):
     sm = get_sessionmaker()
     async with sm() as s:
         u = await s.scalar(select(User).where(User.user_id == message.from_user.id))
-        if not u or not u.group_id:
-            await message.answer("Немає групи. Натисніть /start.")
+        if not u or (u.role == "student" and not u.group_id) or (u.role == "teacher" and not u.teacher_id):
+            await message.answer("Немає налаштованої групи/викладача. Натисніть /start.")
             return
 
         from datetime import timedelta
         start = today_kiev().date()
         end = start + timedelta(days=6)
 
-        rows = list((await s.execute(
-            select(TimetableEvent).where(
-                (TimetableEvent.group_id == u.group_id) &
-                (TimetableEvent.date >= start) &
-                (TimetableEvent.date <= end)
-            ).order_by(TimetableEvent.date, TimetableEvent.time_start, TimetableEvent.lesson_number)
-        )).scalars())
+        rows = await events_for_user_range(s, u, start, end)
 
         if not rows:
             await message.answer(f"Пари з {start.strftime('%d.%m.%Y')} по {end.strftime('%d.%m.%Y')} не знайдені.")
@@ -173,11 +165,20 @@ async def week(message: Message):
                 subj = _subject_display(e)
                 lt = f" ({e.lesson_type})" if e.lesson_type else ""
                 room = f", ауд. {e.auditory}" if e.auditory else ""
-                teacher = _teacher_display(e)
-                teach = f"\n   Викл.: {teacher}" if teacher else ""
+
+                extra = ""
+                if u.role == "teacher":
+                    groups = _groups_display(e)
+                    if groups:
+                        extra += f"\n   Групи: {groups}"
+                else:
+                    teacher = _teacher_display(e)
+                    if teacher:
+                        extra += f"\n   Викл.: {teacher}"
+
                 zoom = await zoom_for_event(s, e)
                 zoom_line = f"\n   Zoom: {zoom}" if zoom else ""
-                b.add(f"• {t} — ").add_bold(subj).add(f"{lt}{room}{teach}{zoom_line}").newline()
+                b.add(f"• {t} — ").add_bold(subj).add(f"{lt}{room}{extra}{zoom_line}").newline()
 
     text, entities = b.build()
     await message.answer(text, entities=entities)
@@ -185,7 +186,6 @@ async def week(message: Message):
 # ---------- Найближча пара ----------
 @router.message(Command("next"))
 async def next_lesson(message: Message):
-    """Показати найближчу пару від поточного часу (Київ). Якщо сьогодні все минуло — першу в майбутні дні."""
     sm = get_sessionmaker()
     now_local = now_kiev()
     today = now_local.date()
@@ -193,15 +193,11 @@ async def next_lesson(message: Message):
 
     async with sm() as s:
         u = await s.scalar(select(User).where(User.user_id == message.from_user.id))
-        if not u or not u.group_id:
-            await message.answer("Немає групи. Натисніть /start.")
+        if not u or (u.role == "student" and not u.group_id) or (u.role == "teacher" and not u.teacher_id):
+            await message.answer("Немає налаштованої групи/викладача. Натисніть /start.")
             return
 
-        rows_today = list((await s.execute(
-            select(TimetableEvent).where(
-                (TimetableEvent.group_id == u.group_id) & (TimetableEvent.date == today)
-            ).order_by(TimetableEvent.time_start, TimetableEvent.lesson_number)
-        )).scalars())
+        rows_today = await events_for_user_day(s, u, today)
 
         def is_future(ev: TimetableEvent) -> bool:
             if ev.time_start:
@@ -210,11 +206,7 @@ async def next_lesson(message: Message):
 
         next_ev = next((e for e in rows_today if is_future(e)), None)
         if not next_ev:
-            rows_future = list((await s.execute(
-                select(TimetableEvent).where(
-                    (TimetableEvent.group_id == u.group_id) & (TimetableEvent.date > today)
-                ).order_by(TimetableEvent.date, TimetableEvent.time_start, TimetableEvent.lesson_number)
-            )).scalars())
+            rows_future = await events_for_user_range(s, u, today, today.replace(day=today.day + 14))
             if rows_future:
                 next_ev = rows_future[0]
 
@@ -232,25 +224,33 @@ async def next_lesson(message: Message):
         subj = _subject_display(next_ev)
         lt = f" ({next_ev.lesson_type})" if next_ev.lesson_type else ""
         room = f", ауд. {next_ev.auditory}" if next_ev.auditory else ""
-        teacher = _teacher_display(next_ev)
-        teach = f"\nВикл.: {teacher}" if teacher else ""
+
+        extra = ""
+        if u.role == "teacher":
+            groups = _groups_display(next_ev)
+            if groups:
+                extra += f"\nГрупи: {groups}"
+        else:
+            teacher = _teacher_display(next_ev)
+            if teacher:
+                extra += f"\nВикл.: {teacher}"
+
         zoom = await zoom_for_event(s, next_ev)
         zoom_line = f"\nZoom: {zoom}" if zoom else ""
 
         b.add(f"Найближча пара — {date_str}\n")
-        b.add(f"{t} — ").add_bold(subj).add(f"{lt}{room}{teach}{zoom_line}")
+        b.add(f"{t} — ").add_bold(subj).add(f"{lt}{room}{extra}{zoom_line}")
 
     text, entities = b.build()
     await message.answer(text, entities=entities)
 
-# ---------- Адмін-команда: додати/оновити Zoom викладача ----------
+# ---------- Адмін-команда: Zoom ----------
 class ZoomAdd(StatesGroup):
     teacher = State()
     link = State()
 
 @router.message(Command("addzoom", "setzoom"))
 async def addzoom_entry(message: Message, state: FSMContext):
-    """Адмін-команда: вибір викладача зі списку."""
     sm = get_sessionmaker()
     async with sm() as s:
         names = await list_distinct_teachers(s)

@@ -1,241 +1,261 @@
-from typing import Iterable, Sequence
-from datetime import datetime, date
+from __future__ import annotations
+from typing import Iterable, Sequence, Tuple
+from datetime import datetime, date, timedelta
 
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, delete, and_, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import (
-    Faculty,
-    Group,
-    User,
-    TimetableEvent,
-    NotificationLog,
-    TeacherZoom,
+    User, Group, Faculty, Chair, Teacher, TimetableEvent, NotificationLog, ZoomLink
 )
 
-# ---------- FACULTIES ----------
-async def upsert_faculties(s: AsyncSession, items: list[tuple[int, str]]):
-    for fid, title in items:
-        row = await s.scalar(select(Faculty).where(Faculty.id == fid))
-        if row:
-            row.title = title
+# ---------- Довідники ----------
+async def upsert_faculties(session: AsyncSession, pairs: list[tuple[int, str]]):
+    for fid, title in pairs:
+        f = await session.get(Faculty, fid)
+        if not f:
+            f = Faculty(id=fid, title=title)
+            session.add(f)
+
+async def upsert_groups(session: AsyncSession, faculty_id: int, course: int, pairs: list[tuple[int, str]]):
+    for gid, title in pairs:
+        g = await session.get(Group, gid)
+        if not g:
+            g = Group(id=gid, faculty_id=faculty_id, course=course, title=title)
+            session.add(g)
         else:
-            s.add(Faculty(id=fid, title=title))
+            if g.title != title:
+                g.title = title
 
-# ---------- GROUPS ----------
-async def upsert_groups(s: AsyncSession, faculty_id: int, course: int, groups: list[tuple[int, str]]):
-    for gid, title in groups:
-        row = await s.scalar(select(Group).where(Group.id == gid))
-        if row:
-            row.title = title
-            row.faculty_id = faculty_id
-            row.course = course
+async def upsert_chairs(session: AsyncSession, pairs: list[tuple[int, str]]):
+    for cid, title in pairs:
+        c = await session.get(Chair, cid)
+        if not c:
+            c = Chair(id=cid, title=title)
+            session.add(c)
         else:
-            s.add(Group(id=gid, faculty_id=faculty_id, course=course, title=title))
+            if c.title != title:
+                c.title = title
 
-# ---------- USERS ----------
-async def get_or_create_user(s: AsyncSession, user_id: int) -> User:
-    u = await s.scalar(select(User).where(User.user_id == user_id))
-    if not u:
-        u = User(user_id=user_id)
-        s.add(u)
-    return u
-
-# ---------- EVENTS (upsert для одиночних подій) ----------
-async def upsert_events(s: AsyncSession, events: Iterable[TimetableEvent]):
-    for e in events:
-        stmt = select(TimetableEvent).where(
-            (TimetableEvent.group_id == e.group_id) &
-            (TimetableEvent.date == e.date) &
-            (TimetableEvent.lesson_number == e.lesson_number) &
-            (TimetableEvent.subject_code == e.subject_code) &
-            (TimetableEvent.auditory == e.auditory) &
-            (TimetableEvent.teacher_short == e.teacher_short)
-        )
-        exists = await s.scalar(stmt)
-        if exists:
-            exists.subject_full = e.subject_full
-            exists.lesson_type = e.lesson_type
-            exists.teacher_full = e.teacher_full
-            exists.source_added = e.source_added
-            exists.source_hash = e.source_hash
-            exists.time_start = e.time_start or exists.time_start
-            exists.time_end = e.time_end or exists.time_end
-        else:
-            s.add(e)
-
-# ---------- EVENTS (повна синхронізація за діапазоном дат) ----------
-def _event_key(e: TimetableEvent) -> tuple:
-    # Ключ синхронізації (у межах group_id + дати):
-    return (e.date, e.lesson_number, e.subject_code, e.auditory, e.teacher_short)
-
-async def sync_events_for_group(
-    s: AsyncSession,
-    group_id: int,
-    new_events: Iterable[TimetableEvent],
-) -> int:
-    """
-    Повна синхронізація за датами, присутніми в new_events:
-      - upsert для кожної нової пари;
-      - delete старих записів (тільки в межах знайдених дат), яких більше немає.
-    Повертає кількість актуальних записів після синку за охоплені дати.
-    """
-    new_list = list(new_events)
-    if not new_list:
-        return 0
-
-    dates: set[date] = {e.date for e in new_list if e.date}
-
-    q_old = select(TimetableEvent).where(
-        (TimetableEvent.group_id == group_id) &
-        (TimetableEvent.date.in_(dates))
-    )
-    old_rows = list((await s.execute(q_old)).scalars())
-    old_map = {_event_key(e): e for e in old_rows}
-
-    new_keys = set()
-    for e in new_list:
-        key = _event_key(e)
-        new_keys.add(key)
-        exists = old_map.get(key)
-        if exists:
-            exists.subject_full = e.subject_full
-            exists.lesson_type = e.lesson_type
-            exists.teacher_full = e.teacher_full
-            exists.source_added = e.source_added
-            exists.source_hash = e.source_hash
-            exists.time_start = e.time_start or exists.time_start
-            exists.time_end = e.time_end or exists.time_end
-        else:
-            s.add(e)
-
-    to_delete_ids = [old_map[k].id for k in (old_map.keys() - new_keys)]
-    if to_delete_ids:
-        await s.execute(
-            delete(TimetableEvent).where(TimetableEvent.id.in_(to_delete_ids))
-        )
-
-    cnt = await s.scalar(
-        select(func.count(TimetableEvent.id)).where(
-            (TimetableEvent.group_id == group_id) &
-            (TimetableEvent.date.in_(dates))
-        )
-    )
-    return int(cnt or 0)
-
-# ---------- REPORTING / HELPERS ----------
-async def distinct_group_ids_in_users(s: AsyncSession) -> Sequence[int]:
-    rows = await s.execute(select(User.group_id).where(User.group_id.is_not(None)).distinct())
-    return [r[0] for r in rows if r[0] is not None]
-
-async def users_for_group(s: AsyncSession, group_id: int) -> Sequence[User]:
-    res = await s.execute(select(User).where(User.group_id == group_id))
-    return list(res.scalars())
-
-async def upcoming_events_window(s: AsyncSession, kiev_now, offset_min: int):
-    """
-    Повертає (user, event, scheduled_for_utc) для подій,
-    що стартують у вікні [now+offset, now+offset+60s] у TZ Києва.
-    """
-    from sqlalchemy import select
-    from models import TimetableEvent as E, User as U
-    from utils.time import combine_local, to_utc
-
-    users = list((await s.execute(select(U).where(U.group_id.is_not(None)))).scalars())
-    results = []
-    for u in users:
-        events = list((await s.execute(select(E).where(E.group_id == u.group_id))).scalars())
-        for e in events:
-            if not e.time_start:
-                continue
-            dt_local = combine_local(e.date, e.time_start)
-            delta = (dt_local - kiev_now).total_seconds()
-            if (offset_min * 60) <= delta < (offset_min * 60 + 60):
-                results.append((u, e, to_utc(dt_local)))
-    return results
-
-async def has_notification(s: AsyncSession, user_id: int, event_id: int) -> bool:
-    return await s.scalar(
-        select(func.count(NotificationLog.id)).where(
-            (NotificationLog.user_id == user_id) & (NotificationLog.event_id == event_id)
-        )
-    ) > 0
-
-# ---------- TEACHER ZOOM ----------
-async def list_distinct_teachers(s: AsyncSession) -> list[str]:
-    """Унікальні імена викладачів із подій (повні та скорочені)."""
-    res1 = await s.execute(
-        select(TimetableEvent.teacher_full)
-        .where(TimetableEvent.teacher_full.is_not(None))
-        .distinct()
-    )
-    res2 = await s.execute(
-        select(TimetableEvent.teacher_short)
-        .where(TimetableEvent.teacher_short.is_not(None))
-        .distinct()
-    )
-    names = {r[0] for r in res1 if r[0]} | {r[0] for r in res2 if r[0]}
-    return sorted(names, key=lambda x: x.lower())
-
-async def set_zoom_link(s: AsyncSession, teacher_name: str, url: str):
-    """Створити/оновити Zoom для викладача (за ключем-іменем)."""
-    row = await s.get(TeacherZoom, teacher_name)
-    now = datetime.utcnow()
-    if row:
-        row.zoom_url = url
-        row.updated_at = now
-    else:
-        s.add(TeacherZoom(teacher_name=teacher_name, zoom_url=url, updated_at=now))
-
-async def get_zoom_link(s: AsyncSession, teacher_name: str) -> str | None:
-    row = await s.get(TeacherZoom, teacher_name)
-    return row.zoom_url if row else None
-
-async def zoom_for_event(s: AsyncSession, e: TimetableEvent) -> str | None:
-    """Підібрати Zoom за full або short ім'ям викладача."""
-    for name in (e.teacher_full, e.teacher_short):
-        if not name:
-            continue
-        z = await s.get(TeacherZoom, name)
-        if z:
-            return z.zoom_url
+def _short_from_full(full: str) -> str | None:
+    parts = full.strip().split()
+    if len(parts) >= 2:
+        try:
+            return f"{parts[0]} {parts[1][0]}.{parts[2][0]}." if len(parts) >= 3 else f"{parts[0]} {parts[1][0]}."
+        except Exception:
+            return None
     return None
 
-# ---------- CLEANUP ----------
-async def cleanup_old_records(
-    s: AsyncSession,
-    cutoff_event_date: date,
-    cutoff_notif_dt: datetime,
-) -> dict:
+async def upsert_teachers(session: AsyncSession, chair_id: int, pairs: list[tuple[int, str]]):
+    for tid, fio in pairs:
+        t = await session.get(Teacher, tid)
+        if not t:
+            t = Teacher(id=tid, chair_id=chair_id, full_name=fio, short_name=_short_from_full(fio))
+            session.add(t)
+        else:
+            changed = False
+            if t.full_name != fio:
+                t.full_name = fio; changed = True
+            if t.chair_id != chair_id:
+                t.chair_id = chair_id; changed = True
+            if changed:
+                t.short_name = t.short_name or _short_from_full(t.full_name)
+
+# ---------- Списки для планувальника ----------
+async def distinct_group_ids_in_users(session: AsyncSession) -> set[int]:
+    rows = await session.execute(select(User.group_id).where(User.group_id.is_not(None)))
+    return set([gid for (gid,) in rows if gid is not None])
+
+async def distinct_teacher_ids_in_users(session: AsyncSession) -> set[int]:
+    rows = await session.execute(select(User.teacher_id).where(User.teacher_id.is_not(None)))
+    return set([tid for (tid,) in rows if tid is not None])
+
+# ---------- Синхронізація подій ----------
+async def sync_events_for_group(session: AsyncSession, group_id: int, new_events: Sequence[TimetableEvent]):
+    """
+    Простий підхід: видаляємо всі майбутні події групи (від "сьогодні - 1 день"), вставляємо нові.
+    """
+    cutoff = date.today() - timedelta(days=1)
+    await session.execute(
+        delete(TimetableEvent).where(
+            and_(TimetableEvent.group_id == group_id, TimetableEvent.date >= cutoff)
+        )
+    )
+    for e in new_events:
+        e.group_id = group_id
+        session.add(e)
+
+async def sync_events_for_teacher(session: AsyncSession, teacher_id: int, new_events: Sequence[TimetableEvent]):
+    cutoff = date.today() - timedelta(days=1)
+    await session.execute(
+        delete(TimetableEvent).where(
+            and_(TimetableEvent.teacher_id == teacher_id, TimetableEvent.date >= cutoff)
+        )
+    )
+    for e in new_events:
+        e.teacher_id = teacher_id
+        session.add(e)
+
+# ---------- Витяг подій для команд ----------
+async def events_for_user_day(session: AsyncSession, u: User, target_date: date) -> list[TimetableEvent]:
+    if u.role == "teacher" and u.teacher_id:
+        q = select(TimetableEvent).where(
+            and_(TimetableEvent.teacher_id == u.teacher_id, TimetableEvent.date == target_date)
+        ).order_by(TimetableEvent.time_start, TimetableEvent.lesson_number)
+    else:
+        q = select(TimetableEvent).where(
+            and_(TimetableEvent.group_id == u.group_id, TimetableEvent.date == target_date)
+        ).order_by(TimetableEvent.time_start, TimetableEvent.lesson_number)
+    rows = await session.execute(q)
+    return list(rows.scalars())
+
+async def events_for_user_range(session: AsyncSession, u: User, start: date, end: date) -> list[TimetableEvent]:
+    if u.role == "teacher" and u.teacher_id:
+        q = select(TimetableEvent).where(
+            and_(
+                TimetableEvent.teacher_id == u.teacher_id,
+                TimetableEvent.date >= start,
+                TimetableEvent.date <= end
+            )
+        ).order_by(TimetableEvent.date, TimetableEvent.time_start, TimetableEvent.lesson_number)
+    else:
+        q = select(TimetableEvent).where(
+            and_(
+                TimetableEvent.group_id == u.group_id,
+                TimetableEvent.date >= start,
+                TimetableEvent.date <= end
+            )
+        ).order_by(TimetableEvent.date, TimetableEvent.time_start, TimetableEvent.lesson_number)
+    rows = await session.execute(q)
+    return list(rows.scalars())
+
+# ---------- Нагадування ----------
+async def upcoming_events_for_user(session: AsyncSession, u: User, now_local_dt, notify_offset_min: int):
+    """
+    Повертає [(u, event, scheduled_for_dt_local), ...] для конкретного користувача.
+    Час початку події (e.date + e.time_start) ∈ (now+offset, now+offset+60с].
+    """
+    from utils.time import combine_local
+    from datetime import timedelta
+
+    window_start = now_local_dt + timedelta(minutes=notify_offset_min)
+    window_end = window_start + timedelta(seconds=60)
+
+    if u.role == "teacher" and u.teacher_id:
+        q = select(TimetableEvent).where(
+            and_(
+                TimetableEvent.teacher_id == u.teacher_id,
+                TimetableEvent.date >= window_start.date(),
+                TimetableEvent.date <= window_end.date(),
+            )
+        )
+    else:
+        q = select(TimetableEvent).where(
+            and_(
+                TimetableEvent.group_id == u.group_id,
+                TimetableEvent.date >= window_start.date(),
+                TimetableEvent.date <= window_end.date(),
+            )
+        )
+    rows = list((await session.execute(q)).scalars())
+
+    out = []
+    for e in rows:
+        if not e.time_start:
+            continue
+        dt_local = combine_local(e.date, e.time_start)
+        if window_start < dt_local <= window_end:
+            out.append((u, e, dt_local))
+    return out
+
+async def has_notification(session: AsyncSession, user_id: int, event_id: int) -> bool:
+    q = select(NotificationLog.id).where(
+        and_(NotificationLog.user_id == user_id, NotificationLog.event_id == event_id)
+    )
+    return (await session.scalar(q)) is not None
+
+# ---------- Zoom: список імен для пагінації ----------
+async def list_distinct_teachers(session: AsyncSession) -> list[str]:
+    names = set()
+    rows = await session.execute(
+        select(TimetableEvent.teacher_full).where(TimetableEvent.teacher_full.is_not(None))
+    )
+    for (name,) in rows:
+        if name:
+            names.add(name)
+    rows2 = await session.execute(select(Teacher.full_name))
+    for (name,) in rows2:
+        if name:
+            names.add(name)
+    return sorted(names)
+
+# ---------- Zoom: upsert і отримання лінка ----------
+async def set_zoom_link(session: AsyncSession, teacher_name: str, url: str):
+    """
+    Зберігає/оновлює Zoom-лінк для викладача за повним ПІБ.
+    Намагатимемось підв'язати до Teacher, якщо знайдемо по full_name.
+    """
+    name = (teacher_name or "").strip()
+    if not name:
+        return
+
+    # Спробуємо знайти викладача в довіднику
+    t = await session.scalar(select(Teacher).where(Teacher.full_name == name))
+
+    # Шукаємо існуючий запис ZoomLink
+    zl = await session.scalar(select(ZoomLink).where(ZoomLink.teacher_name == name))
+    if not zl and t:
+        zl = await session.scalar(select(ZoomLink).where(ZoomLink.teacher_id == t.id))
+
+    if zl:
+        zl.teacher_name = name
+        zl.url = url
+        if t and zl.teacher_id != t.id:
+            zl.teacher_id = t.id
+        zl.updated_at = datetime.utcnow()
+    else:
+        zl = ZoomLink(teacher_id=t.id if t else None, teacher_name=name, url=url, updated_at=datetime.utcnow())
+        session.add(zl)
+
+async def zoom_for_event(session: AsyncSession, e: TimetableEvent) -> str | None:
+    """
+    Повертає Zoom-лінк для події: пріоритет — за повним ПІБ, далі за teacher_id.
+    """
+    # 1) за повним ПІБ
+    if e.teacher_full:
+        url = await session.scalar(select(ZoomLink.url).where(ZoomLink.teacher_name == e.teacher_full))
+        if url:
+            return url
+    # 2) за teacher_id (актуально для "режиму викладача")
+    if e.teacher_id:
+        url = await session.scalar(select(ZoomLink.url).where(ZoomLink.teacher_id == e.teacher_id))
+        if url:
+            return url
+    return None
+
+# ---------- Очищення БД ----------
+async def cleanup_old_records(session: AsyncSession, cutoff_event_date: date, cutoff_notif_dt: datetime) -> Tuple[int, int]:
     """
     Видаляє:
-      1) NotificationLog, які старші за cutoff_notif_dt;
-      2) NotificationLog, пов'язані з подіями старшими за cutoff_event_date;
-      3) TimetableEvent зі ️датою < cutoff_event_date.
-    Повертає dict з кількостями видалених рядків.
+      • TimetableEvent із датою < cutoff_event_date
+      • NotificationLog із sent_at/ scheduled_for < cutoff_notif_dt
+    Повертає (n_events, n_logs).
     """
-    # Спочатку — логи, щоб не ламати FK на events
-    # 1) старі за часом
-    res1 = await s.execute(
-        delete(NotificationLog).where(NotificationLog.scheduled_for < cutoff_notif_dt)
-    )
-    deleted_logs_time = res1.rowcount or 0
-
-    # 2) логи, чиї події старші за cutoff_event_date
-    subq_old_events = select(TimetableEvent.id).where(TimetableEvent.date < cutoff_event_date)
-    res2 = await s.execute(
-        delete(NotificationLog).where(NotificationLog.event_id.in_(subq_old_events))
-    )
-    deleted_logs_by_events = res2.rowcount or 0
-
-    # 3) самі події
-    res3 = await s.execute(
+    # Events
+    res1 = await session.execute(
         delete(TimetableEvent).where(TimetableEvent.date < cutoff_event_date)
     )
-    deleted_events = res3.rowcount or 0
+    n_events = res1.rowcount or 0
 
-    return {
-        "deleted_logs_time": int(deleted_logs_time),
-        "deleted_logs_by_events": int(deleted_logs_by_events),
-        "deleted_events": int(deleted_events),
-    }
+    # Logs
+    res2 = await session.execute(
+        delete(NotificationLog).where(
+            or_(
+                NotificationLog.sent_at.is_(None) & (NotificationLog.scheduled_for < cutoff_notif_dt),
+                NotificationLog.sent_at.is_not(None) & (NotificationLog.sent_at < cutoff_notif_dt),
+            )
+        )
+    )
+    n_logs = res2.rowcount or 0
+
+    return n_events, n_logs

@@ -7,12 +7,11 @@ from datetime import datetime, date, time
 from bs4 import BeautifulSoup
 
 
-# ────────────────────────────── BASIC SELECT PARSERS ──────────────────────────
+# ───────────── BASIC SELECT PARSERS (студент) ─────────────
 
 def parse_faculties(html: str) -> list[tuple[int, str]]:
-    """Повертає список (id, назва) факультетів із селекта #timetableform-facultyid."""
     soup = BeautifulSoup(html, "lxml")
-    sel = soup.select_one("#timetableform-facultyid")
+    sel = soup.select_one("#timetableform-facultyid, select[name='TimeTableForm[facultyId]']")
     out: list[tuple[int, str]] = []
     if sel:
         for opt in sel.select("option"):
@@ -22,9 +21,8 @@ def parse_faculties(html: str) -> list[tuple[int, str]]:
     return out
 
 def parse_courses(html: str) -> list[int]:
-    """Повертає список можливих курсів із селекта #timetableform-course."""
     soup = BeautifulSoup(html, "lxml")
-    sel = soup.select_one("#timetableform-course")
+    sel = soup.select_one("#timetableform-course, select[name='TimeTableForm[course]']")
     out: list[int] = []
     if sel:
         for opt in sel.select("option"):
@@ -34,9 +32,8 @@ def parse_courses(html: str) -> list[int]:
     return out
 
 def parse_groups(html: str) -> list[tuple[int, str]]:
-    """Повертає список (id, назва) груп із селекта #timetableform-groupid."""
     soup = BeautifulSoup(html, "lxml")
-    sel = soup.select_one("#timetableform-groupid")
+    sel = soup.select_one("#timetableform-groupid, select[name='TimeTableForm[groupId]']")
     out: list[tuple[int, str]] = []
     if sel:
         for opt in sel.select("option"):
@@ -46,7 +43,32 @@ def parse_groups(html: str) -> list[tuple[int, str]]:
     return out
 
 
-# ────────────────────────────── HELPERS ───────────────────────────────────────
+# ───────────── BASIC SELECT PARSERS (викладач) ────────────
+
+def parse_chairs(html: str) -> list[tuple[int, str]]:
+    soup = BeautifulSoup(html, "lxml")
+    sel = soup.select_one("#timetableform-chairid, select[name='TimeTableForm[chairId]']")
+    out: list[tuple[int, str]] = []
+    if sel:
+        for opt in sel.select("option"):
+            v = (opt.get("value") or "").strip()
+            if v.isdigit():
+                out.append((int(v), opt.text.strip()))
+    return out
+
+def parse_teachers(html: str) -> list[tuple[int, str]]:
+    soup = BeautifulSoup(html, "lxml")
+    sel = soup.select_one("#timetableform-teacherid, select[name='TimeTableForm[teacherId]']")
+    out: list[tuple[int, str]] = []
+    if sel:
+        for opt in sel.select("option"):
+            v = (opt.get("value") or "").strip()
+            if v.isdigit():
+                out.append((int(v), opt.text.strip()))
+    return out
+
+
+# ───────────── HELPERS (час, типи) ─────────────
 
 _LESSON_TYPE_MAP = {
     "лк": "Лекція",
@@ -70,9 +92,6 @@ def _parse_lesson_type(s: str | None) -> str | None:
     return _LESSON_TYPE_MAP.get(key, m.group(1))
 
 def _dt_from_title(title: str) -> tuple[date, int] | None:
-    """
-    Приклад title: "01.09.2025 5 пара"
-    """
     m = re.search(r"(\d{2}\.\d{2}\.\d{4})\s+(\d+)\s*пара", title, re.I)
     if not m:
         return None
@@ -81,20 +100,11 @@ def _dt_from_title(title: str) -> tuple[date, int] | None:
     return d, num
 
 def _strip_html_lines(s: str) -> list[str]:
-    """Розбити HTML на рядки: <br> -> \n, прибрати теги, повернути не-порожні рядки."""
+    from bs4 import BeautifulSoup as BS
     s = s.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
-    return [line.strip() for line in BeautifulSoup(s, "lxml").get_text("\n").splitlines() if line.strip()]
+    return [line.strip() for line in BS(s, "lxml").get_text("\n").splitlines() if line.strip()]
 
 def _extract_row_times(soup: BeautifulSoup) -> dict[int, tuple[time | None, time | None]]:
-    """
-    Зчитати час для кожного номера пари з лівої колонки таблиці:
-      <th class="headcol">
-        <span class="lesson">5 пара</span>
-        <span class="start">13:35</span>
-        <span class="end">14:55</span>
-      </th>
-    Повертає {lesson_number: (start_time, end_time)}. Якщо чогось немає — None.
-    """
     row_times: dict[int, tuple[time | None, time | None]] = {}
 
     def _parse_hhmm(txt: str) -> time | None:
@@ -123,42 +133,26 @@ def _extract_row_times(soup: BeautifulSoup) -> dict[int, tuple[time | None, time
     return row_times
 
 
-# ────────────────────────────── MAIN: TIMETABLE ───────────────────────────────
+# ───────────── MAIN: STUDENT ─────────────
 
 def parse_timetable(
     html: str,
     group_id: int,
     cfg_times: dict[int, tuple[str, str]] | None = None
 ) -> Iterable[dict]:
-    """
-    Парсер табличного розкладу:
-      • дату й номер пари беремо з title/data-title/data-original-title;
-      • ПОВНУ назву — з першого рядка data-content (без суфікса [Лк]/[Пз]...);
-      • АБРЕВІАТУРУ (subject_code) — з першого видимого рядка всередині клітинки;
-      • ЧАС пари — пріоритетно з лівої колонки (th.headcol), fallback → cfg_times.
-    Повертає словники під створення TimetableEvent.
-    """
     soup = BeautifulSoup(html, "lxml")
-
-    # 1) Фактичні часи пар зі сторінки
     row_times = _extract_row_times(soup)
-
-    # 2) Клітинки з поповерами (Bootstrap 3/4/5)
     popovers = soup.select('[data-toggle="popover"], [data-bs-toggle="popover"]')
 
     for d in popovers:
-        # Дата + номер пари
         title = d.get("data-original-title") or d.get("title") or d.get("data-title") or ""
         dt_pair = _dt_from_title(title)
         if not dt_pair:
             continue
         dt, lesson_num = dt_pair
 
-        # Вміст поповера
         dc = d.get("data-content") or d.get("data-bs-content") or ""
         info_lines = _strip_html_lines(dc)
-
-        # Видимий короткий текст у клітинці (перший рядок — абревіатура)
         cell_lines = _strip_html_lines(str(d))
 
         subject_full = None
@@ -169,53 +163,36 @@ def parse_timetable(
         teacher_full = None
         source_added = None
 
-        # --- повна назва + тип заняття з data-content
         if info_lines:
-            # 1-й рядок: повна назва; приберемо суфікс типу в дужках квадратних
             subject_full_raw = info_lines[0]
             lesson_type = _parse_lesson_type(subject_full_raw)
             subject_full = re.sub(r"\s*\[.*?\]\s*$", "", subject_full_raw).strip()
 
-            # інші рядки — шукаємо аудиторію, викладача, "Додано"
             for line in info_lines[1:]:
                 l = line.lower()
-
-                # Аудиторія: "ауд. 2411" або "Аудиторія: ..."
                 if l.startswith("ауд."):
                     auditory = line.split(" ", 1)[1].strip() if " " in line else line.replace("ауд.", "").strip()
                     continue
-                if l.startswith("ауд"):
-                    parts = line.split(":", 1)
-                    if len(parts) == 2 and parts[0].strip().lower().startswith("ауд"):
-                        auditory = parts[1].strip()
-                        continue
-
-                # "Додано: 27.08.2025"
                 if l.startswith("додано"):
                     m = re.search(r"(\d{2}\.\d{2}\.\d{4})", line)
                     if m:
                         source_added = datetime.strptime(m.group(1), "%d.%m.%Y").date()
                     continue
-
-                # Викладач (короткий/повний формат)
-                if re.search(r"[А-ЯІЇЄҐ][а-яіїєґ']+\s+[А-Я]\.[А-Я]\.$", line):
-                    teacher_short = line.strip()
-                elif re.search(r"[А-ЯІЇЄҐ][а-яіїєґ']+\s+[А-Я][а-яіїєґ']+\s+[А-Я][а-яіїєґ']+$", line):
+                if re.search(r"[А-ЯІЇЄҐ][а-яіїєґ']+\s+[А-Я][а-яіїєґ']+\s+[А-Я][а-яіїєґ']+$", line):
                     teacher_full = line.strip()
+                elif re.search(r"[А-ЯІЇЄҐ][а-яіїєґ']+\s+[А-Я]\.[А-Я]\.$", line):
+                    teacher_short = line.strip()
 
-        # --- абревіатура з першого видимого рядка клітинки (до [..])
         if cell_lines:
             first = re.sub(r"\[.*?\]", "", cell_lines[0]).strip()
             if 1 <= len(first) <= 15:
                 subject_code = first
-            # інколи короткі ініціали викладача є тут
             if not teacher_short:
                 for ln in cell_lines[1:]:
                     if re.search(r"[А-ЯІЇЄҐ][а-яіїєґ']+\s+[А-Я]\.[А-Я]\.$", ln):
                         teacher_short = ln.strip()
                         break
 
-        # --- час: зі сторінки, інакше — з cfg_times
         t_start, t_end = row_times.get(lesson_num, (None, None))
         if (t_start is None or t_end is None) and cfg_times and (lesson_num in cfg_times):
             sh, eh = cfg_times[lesson_num]
@@ -227,6 +204,7 @@ def parse_timetable(
 
         yield {
             "group_id": group_id,
+            "teacher_id": None,
             "date": dt,
             "weekday": None,
             "lesson_number": lesson_num,
@@ -238,6 +216,100 @@ def parse_timetable(
             "auditory": auditory,
             "teacher_short": teacher_short,
             "teacher_full": teacher_full,
+            "groups_text": None,
+            "source_added": source_added,
+            "source_url": None,
+            "source_hash": None,
+            "raw_html": str(d),
+        }
+
+
+# ───────────── MAIN: TEACHER ─────────────
+
+def parse_timetable_teacher(
+    html: str,
+    teacher_id: int,
+    teacher_full_name: str | None,
+    cfg_times: dict[int, tuple[str, str]] | None = None
+) -> Iterable[dict]:
+    soup = BeautifulSoup(html, "lxml")
+    row_times = _extract_row_times(soup)
+    popovers = soup.select('[data-toggle="popover"], [data-bs-toggle="popover"]')
+
+    for d in popovers:
+        title = d.get("data-original-title") or d.get("title") or d.get("data-title") or ""
+        dt_pair = _dt_from_title(title)
+        if not dt_pair:
+            continue
+        dt, lesson_num = dt_pair
+
+        dc = d.get("data-content") or d.get("data-bs-content") or ""
+        info_lines = _strip_html_lines(dc)
+        cell_lines = _strip_html_lines(str(d))
+
+        subject_full = None
+        subject_code = None
+        lesson_type = None
+        auditory = None
+        groups_text = None
+        source_added = None
+
+        if info_lines:
+            subject_full_raw = info_lines[0]
+            lesson_type = _parse_lesson_type(subject_full_raw)
+            subject_full = re.sub(r"\s*\[.*?\]\s*$", "", subject_full_raw).strip()
+
+            for line in info_lines[1:]:
+                l = line.lower()
+                if l.startswith("ауд."):
+                    auditory = line.split(" ", 1)[1].strip() if " " in line else line.replace("ауд.", "").strip()
+                    continue
+                if l.startswith("додано"):
+                    m = re.search(r"(\d{2}\.\d{2}\.\d{4})", line)
+                    if m:
+                        source_added = datetime.strptime(m.group(1), "%d.%m.%Y").date()
+                    continue
+
+        if cell_lines:
+            first = re.sub(r"\[.*?\]", "", cell_lines[0]).strip()
+            if 1 <= len(first) <= 15:
+                subject_code = first
+
+        # групи в <i>...</i>
+        i_tags = BeautifulSoup(str(d), "lxml").select("i")
+        if i_tags:
+            groups = []
+            for i in i_tags:
+                t = i.get_text(" ", strip=True)
+                if t:
+                    groups.append(t)
+            if groups:
+                groups_text = ", ".join(groups)
+
+        t_start, t_end = row_times.get(lesson_num, (None, None))
+        if (t_start is None or t_end is None) and cfg_times and (lesson_num in cfg_times):
+            sh, eh = cfg_times[lesson_num]
+            try:
+                t_start = t_start or datetime.strptime(sh, "%H:%M").time()
+                t_end = t_end or datetime.strptime(eh, "%H:%M").time()
+            except Exception:
+                pass
+
+        yield {
+            "group_id": None,
+            "teacher_id": teacher_id,
+            "date": dt,
+            "weekday": None,
+            "lesson_number": lesson_num,
+            "time_start": t_start,
+            "time_end": t_end,
+            "subject_code": subject_code,
+            "subject_full": subject_full,
+            "lesson_type": lesson_type,
+            "auditory": auditory,
+            "teacher_short": None,
+            "teacher_full": teacher_full_name,
+            "groups_text": groups_text,
             "source_added": source_added,
             "source_url": None,
             "source_hash": None,

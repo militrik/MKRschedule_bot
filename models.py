@@ -1,94 +1,136 @@
-from datetime import date, time, datetime
-from sqlalchemy import ForeignKey, UniqueConstraint, Index
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from db import Base
+from __future__ import annotations
+from datetime import datetime, date, time
+from typing import Optional
 
+from sqlalchemy import (
+    Column, Integer, String, Date, Time, DateTime, Text, ForeignKey, Index
+)
+from sqlalchemy.orm import declarative_base, relationship
+
+Base = declarative_base()
+
+
+# ---------- Довідники ----------
 class Faculty(Base):
     __tablename__ = "faculties"
-    id: Mapped[int] = mapped_column(primary_key=True)  # з сайту
-    title: Mapped[str] = mapped_column(unique=True)
-    updated_at: Mapped[datetime | None]
+    id = Column(Integer, primary_key=True)
+    title = Column(String(255), nullable=False)
+
+
+class Chair(Base):
+    __tablename__ = "chairs"
+    id = Column(Integer, primary_key=True)
+    title = Column(String(255), nullable=False)
+
+    teachers = relationship("Teacher", back_populates="chair")
+
 
 class Group(Base):
     __tablename__ = "groups"
-    id: Mapped[int] = mapped_column(primary_key=True)  # value селекта
-    faculty_id: Mapped[int] = mapped_column(ForeignKey("faculties.id"))
-    course: Mapped[int]
-    title: Mapped[str]
-    last_schedule_hash: Mapped[str | None]
-    last_checked_at: Mapped[datetime | None]
+    id = Column(Integer, primary_key=True)
+    faculty_id = Column(Integer, ForeignKey("faculties.id"), nullable=True)
+    course = Column(Integer, nullable=True)
+    title = Column(String(255), nullable=False)
 
-    faculty = relationship("Faculty")
+    users = relationship("User", back_populates="group")
 
-    __table_args__ = (
-        UniqueConstraint("faculty_id", "course", "title", name="uq_group_fac_course_title"),
-        Index("ix_group_fac_course", "faculty_id", "course"),
-    )
 
+class Teacher(Base):
+    __tablename__ = "teachers"
+    id = Column(Integer, primary_key=True)
+    full_name = Column(String(255), nullable=False)
+    short_name = Column(String(255), nullable=True)
+    chair_id = Column(Integer, ForeignKey("chairs.id"), nullable=True)
+
+    chair = relationship("Chair", back_populates="teachers")
+
+
+# ---------- Користувач ----------
 class User(Base):
     __tablename__ = "users"
-    user_id: Mapped[int] = mapped_column(primary_key=True)  # Telegram ID
-    faculty_id: Mapped[int | None] = mapped_column(ForeignKey("faculties.id"))
-    course: Mapped[int | None]
-    group_id: Mapped[int | None] = mapped_column(ForeignKey("groups.id"))
-    notify_offset_min: Mapped[int] = mapped_column(default=5)
-    lang: Mapped[str] = mapped_column(default="uk")
-    created_at: Mapped[datetime | None]
-    updated_at: Mapped[datetime | None]
+    user_id = Column(Integer, primary_key=True)  # telegram id
+    role = Column(String(16), nullable=False, default="student")  # 'student' | 'teacher'
 
-    faculty = relationship("Faculty")
-    group = relationship("Group")
+    # student:
+    faculty_id = Column(Integer, ForeignKey("faculties.id"), nullable=True)
+    course = Column(Integer, nullable=True)
+    group_id = Column(Integer, ForeignKey("groups.id"), nullable=True)
 
-    __table_args__ = (Index("ix_users_group", "group_id"),)
+    # teacher:
+    chair_id = Column(Integer, ForeignKey("chairs.id"), nullable=True)
+    teacher_id = Column(Integer, ForeignKey("teachers.id"), nullable=True)
 
+    notify_offset_min = Column(Integer, nullable=False, default=5)
+
+    group = relationship("Group", back_populates="users")
+
+
+# ---------- Розклад ----------
 class TimetableEvent(Base):
     __tablename__ = "timetable_events"
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id"))
-    date: Mapped[date]
-    weekday: Mapped[str | None]
-    lesson_number: Mapped[int]
-    time_start: Mapped[time | None]
-    time_end: Mapped[time | None]
-    subject_code: Mapped[str | None]
-    subject_full: Mapped[str | None]
-    lesson_type: Mapped[str | None]
-    auditory: Mapped[str | None]
-    teacher_short: Mapped[str | None]
-    teacher_full: Mapped[str | None]
-    source_added: Mapped[date | None]
-    source_url: Mapped[str | None]
-    source_hash: Mapped[str | None]
-    raw_html: Mapped[str | None]
 
-    __table_args__ = (
-        UniqueConstraint(
-            "group_id", "date", "lesson_number",
-            "subject_code", "auditory", "teacher_short",
-            name="uq_event_dedup"
-        ),
-        Index("ix_events_group_date", "group_id", "date"),
-        Index("ix_events_date_time", "date", "time_start"),
-    )
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Прив'язка для студентського режиму
+    group_id = Column(Integer, ForeignKey("groups.id"), nullable=True)
+    # Прив'язка для викладацького режиму
+    teacher_id = Column(Integer, ForeignKey("teachers.id"), nullable=True)
 
+    date = Column(Date, nullable=False)
+    weekday = Column(Integer, nullable=True)
+    lesson_number = Column(Integer, nullable=True)
+
+    time_start = Column(Time, nullable=True)
+    time_end = Column(Time, nullable=True)
+
+    subject_code = Column(String(64), nullable=True)
+    subject_full = Column(Text, nullable=True)
+    lesson_type = Column(String(64), nullable=True)
+
+    auditory = Column(String(128), nullable=True)
+
+    teacher_short = Column(String(255), nullable=True)
+    teacher_full = Column(String(255), nullable=True)
+
+    # Для викладача: перелік груп у клітинці
+    groups_text = Column(Text, nullable=True)
+
+    source_added = Column(Date, nullable=True)
+    source_url = Column(Text, nullable=True)
+    source_hash = Column(String(64), nullable=True)
+    raw_html = Column(Text, nullable=True)
+
+
+# Індекси для швидкого пошуку/ідемпотентності
+Index(
+    "ix_events_group_day",
+    TimetableEvent.group_id, TimetableEvent.date, TimetableEvent.time_start, TimetableEvent.lesson_number
+)
+Index(
+    "ix_events_teacher_day",
+    TimetableEvent.teacher_id, TimetableEvent.date, TimetableEvent.time_start, TimetableEvent.lesson_number
+)
+
+
+# ---------- Zoom-лінки ----------
+class ZoomLink(Base):
+    __tablename__ = "zoom_links"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    teacher_id = Column(Integer, ForeignKey("teachers.id"), nullable=True)
+    teacher_name = Column(String(255), nullable=False, unique=True)  # повний ПІБ як ключ
+    url = Column(Text, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ---------- Логи розсилки ----------
 class NotificationLog(Base):
-    __tablename__ = "notifications_log"
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.user_id"))
-    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id"))
-    event_id: Mapped[int] = mapped_column(ForeignKey("timetable_events.id"))
-    scheduled_for: Mapped[datetime]
-    sent_at: Mapped[datetime | None]
-    status: Mapped[str]  # queued/sent/failed/skipped
-    error: Mapped[str | None]
+    __tablename__ = "notification_log"
+    id = Column(Integer, primary_key=True, autoincrement=True)
 
-    __table_args__ = (
-        UniqueConstraint("user_id", "event_id", name="uq_notif_once"),
-        Index("ix_notif_when", "scheduled_for"),
-    )
+    user_id = Column(Integer, nullable=False)
+    group_id = Column(Integer, nullable=True)
+    event_id = Column(Integer, ForeignKey("timetable_events.id"), nullable=False)
 
-class TeacherZoom(Base):
-    __tablename__ = "teacher_zoom"
-    teacher_name: Mapped[str] = mapped_column(primary_key=True)  # ключ = як у розкладі (повне або скорочене ім'я)
-    zoom_url: Mapped[str]
-    updated_at: Mapped[datetime | None]
+    scheduled_for = Column(DateTime, nullable=False)
+    sent_at = Column(DateTime, nullable=True)
+    status = Column(String(16), nullable=False)
+    error = Column(Text, nullable=True)
