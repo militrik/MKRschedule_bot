@@ -18,7 +18,7 @@ from repositories import (
     upsert_faculties, upsert_groups, upsert_chairs, upsert_teachers,
     sync_events_for_group, sync_events_for_teacher
 )
-from keyboards import paginated_kb
+from keyboards import paginated_kb, main_menu_kb
 from utils.diag import log
 
 router = Router(name="onboarding")
@@ -66,6 +66,7 @@ def _page_clamp(total: int, page: int, per_page: int) -> int:
 @router.message(Command("start"))
 async def start_cmd(message: Message, state: FSMContext):
     await state.clear()
+    # Було 2 однакових повідомлення — залишаємо ОДНЕ з inline-вибором ролі
     await message.answer("Будь ласка, оберіть роль:", reply_markup=role_keyboard())
     await state.set_state(StartFSM.role)
 
@@ -151,7 +152,7 @@ async def pick_faculty(cb: CallbackQuery, state: FSMContext):
         courses = [1, 2, 3, 4]
 
     log(f"courses for fac {faculty_id}: {len(courses)}")
-    await state.update_data(courses=courses)  # для можливого майбутнього гортання, хоча їх мало
+    await state.update_data(courses=courses)
 
     kb = paginated_kb([(str(c), f"{c} курс") for c in courses],
                       prefix="crs", per_page=LIST_PER_PAGE, page=0)
@@ -163,12 +164,9 @@ async def pick_faculty(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(StartFSM.course)
 async def pick_course(cb: CallbackQuery, state: FSMContext):
     payload = cb.data
-
-    # (не робимо пагінацію курсів — їх мало; але на всяк випадок просто ігноруємо кліки)
     if payload in ("crs:__prev__", "crs:__next__"):
         await cb.answer()
         return
-
     if not payload.startswith("crs:"):
         await cb.answer()
         return
@@ -237,7 +235,7 @@ async def pick_group(cb: CallbackQuery, state: FSMContext):
         await sync_events_for_group(s, group_id, new_events)
         await s.commit()
 
-    # вибір хвилин
+    # вибір хвилин нагадувань
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"{m} хв", callback_data=f"nm:{m}")] for m in MINUTES_OPTIONS
     ])
@@ -274,7 +272,6 @@ async def pick_chair(cb: CallbackQuery, state: FSMContext):
     page = int(data.get("chr_page", 0))
     payload = cb.data
 
-    # пагінація кафедр
     if payload in ("chr:__prev__", "chr:__next__"):
         delta = -1 if payload.endswith("__prev__") else +1
         page = _page_clamp(len(chairs), page + delta, LIST_PER_PAGE)
@@ -292,7 +289,6 @@ async def pick_chair(cb: CallbackQuery, state: FSMContext):
     chair_id = int(payload.split(":", 1)[1])
     await state.update_data(chair_id=chair_id)
 
-    # отримуємо викладачів для кафедри
     cfg = Config.load()
     sm = get_sessionmaker()
     async with sm() as s, SourceClient(cfg) as sc:
@@ -318,7 +314,6 @@ async def pick_teacher(cb: CallbackQuery, state: FSMContext):
     page = int(data.get("tch_page", 0))
     payload = cb.data
 
-    # пагінація викладачів
     if payload in ("tch:__prev__", "tch:__next__"):
         delta = -1 if payload.endswith("__prev__") else +1
         page = _page_clamp(len(tlist), page + delta, LIST_PER_PAGE)
@@ -336,7 +331,6 @@ async def pick_teacher(cb: CallbackQuery, state: FSMContext):
     teacher_id = int(payload.split(":", 1)[1])
     chair_id = data["chair_id"]
 
-    # зберігаємо вибір користувача
     sm = get_sessionmaker()
     cfg = Config.load()
 
@@ -350,7 +344,6 @@ async def pick_teacher(cb: CallbackQuery, state: FSMContext):
         t = await s.get(Teacher, teacher_id)
         teacher_full = t.full_name if t else None
 
-    # завантажуємо розклад викладача
     async with sm() as s, SourceClient(cfg) as sc:
         html = await sc.post_teacher_filter(chair_id=chair_id, teacher_id=teacher_id)
         events_dicts = list(parse_timetable_teacher(html, teacher_id=teacher_id, teacher_full_name=teacher_full, cfg_times=cfg.lesson_times))
@@ -358,7 +351,6 @@ async def pick_teacher(cb: CallbackQuery, state: FSMContext):
         await sync_events_for_teacher(s, teacher_id, new_events)
         await s.commit()
 
-    # вибір хвилин
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"{m} хв", callback_data=f"nm:{m}")] for m in MINUTES_OPTIONS
     ])
@@ -379,8 +371,9 @@ async def pick_notify(cb: CallbackQuery, state: FSMContext):
         u.notify_offset_min = minutes
         await s.commit()
     await state.clear()
-    await cb.message.edit_text(
+    # Після завершення налаштувань показуємо постійну клавіатуру-меню
+    await cb.message.answer(
         f"Готово!\nВаш час нагадувань: {minutes} хв.\n"
-        f"Доступні команди: /today, /tomorrow, /week, /next, /help"
+        f"Доступні команди: /today, /tomorrow, /week, /next, /help",
+        reply_markup=main_menu_kb()
     )
-    await cb.answer()

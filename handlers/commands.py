@@ -1,12 +1,11 @@
 from itertools import groupby
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from pathlib import Path
 import sys
 
-from aiogram import Router
+from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
 
@@ -14,7 +13,7 @@ from sqlalchemy import select
 
 from db import get_sessionmaker
 from models import User, TimetableEvent
-from keyboards import paginated_kb
+from keyboards import paginated_kb, main_menu_kb, BTN_TODAY, BTN_TOMORROW, BTN_WEEK, BTN_NEXT, BTN_SETTINGS, BTN_HELP
 from utils.time import today_kiev, now_kiev
 from utils.formatting import EntityBuilder
 
@@ -57,9 +56,11 @@ def _read_help_md() -> str:
 async def help_cmd(message: Message):
     text = _read_help_md()
     try:
-        await message.answer(text, parse_mode=ParseMode.MARKDOWN)
+        await message.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu_kb())
     except Exception:
-        await message.answer(text)
+        # якщо Markdown не пройшов – без парс-моду
+        await message.answer(text, reply_markup=main_menu_kb())
+
 
 # ---------- утиліти форматування ----------
 def _subject_display(e: TimetableEvent) -> str:
@@ -75,22 +76,22 @@ def _teacher_display(e: TimetableEvent) -> str | None:
 def _groups_display(e: TimetableEvent) -> str | None:
     return (e.groups_text or "").strip() or None
 
+
 # ---------- Добові відповіді ----------
 async def _send_day(message: Message, day_offset: int):
     sm = get_sessionmaker()
     async with sm() as s:
         u = await s.scalar(select(User).where(User.user_id == message.from_user.id))
         if not u or (u.role == "student" and not u.group_id) or (u.role == "teacher" and not u.teacher_id):
-            await message.answer("Немає налаштованої групи/викладача. Натисніть /start.")
+            await message.answer("Немає налаштованої групи/викладача. Натисніть /start.", reply_markup=main_menu_kb())
             return
 
-        from datetime import timedelta
         target = today_kiev().date() + timedelta(days=day_offset)
         rows = await events_for_user_day(s, u, target)
 
         if not rows:
-            when = "сьогодні" if day_offset == 0 else "завтра" if day_offset == 1 else str(target)
-            await message.answer(f"Пари {when} не знайдені.")
+            when = "сьогодні" if day_offset == 0 else "завтра" if day_offset == 1 else target.strftime('%d.%m.%Y')
+            await message.answer(f"Пари {when} не знайдені.", reply_markup=main_menu_kb())
             return
 
         b = EntityBuilder()
@@ -105,7 +106,6 @@ async def _send_day(message: Message, day_offset: int):
             lt = f" ({e.lesson_type})" if e.lesson_type else ""
             room = f", ауд. {e.auditory}" if e.auditory else ""
 
-            # Відмінності за роллю
             extra = ""
             if u.role == "teacher":
                 groups = _groups_display(e)
@@ -121,7 +121,7 @@ async def _send_day(message: Message, day_offset: int):
             b.add(f"• {t} — ").add_bold(subj).add(f"{lt}{room}{extra}{zoom_line}").newline()
 
     text, entities = b.build()
-    await message.answer(text, entities=entities)
+    await message.answer(text, entities=entities, reply_markup=main_menu_kb())
 
 @router.message(Command("today"))
 async def today(message: Message):
@@ -137,21 +137,20 @@ async def week(message: Message):
     async with sm() as s:
         u = await s.scalar(select(User).where(User.user_id == message.from_user.id))
         if not u or (u.role == "student" and not u.group_id) or (u.role == "teacher" and not u.teacher_id):
-            await message.answer("Немає налаштованої групи/викладача. Натисніть /start.")
+            await message.answer("Немає налаштованої групи/викладача. Натисніть /start.", reply_markup=main_menu_kb())
             return
 
-        from datetime import timedelta
         start = today_kiev().date()
         end = start + timedelta(days=6)
 
         rows = await events_for_user_range(s, u, start, end)
 
         if not rows:
-            await message.answer(f"Пари з {start.strftime('%d.%m.%Y')} по {end.strftime('%d.%m.%Y')} не знайдені.")
+            await message.answer(f"Пари з {start.strftime('%d.%m.%Y')} по {end.strftime('%d.%m.%Y')} не знайдені.", reply_markup=main_menu_kb())
             return
 
         b = EntityBuilder()
-        b.add(f"Розклад на {start.strftime('%d.%m.%Y')}–{end.strftime('%d.%m.%Y')}:\n")
+        b.add(f"Розклад на {start.strftime('%d.%m.%Y')}-{end.strftime('%d.%m.%Y')}:\n")
 
         for day, day_events_iter in groupby(rows, key=lambda e: e.date):
             day_events = list(day_events_iter)
@@ -181,7 +180,7 @@ async def week(message: Message):
                 b.add(f"• {t} — ").add_bold(subj).add(f"{lt}{room}{extra}{zoom_line}").newline()
 
     text, entities = b.build()
-    await message.answer(text, entities=entities)
+    await message.answer(text, entities=entities, reply_markup=main_menu_kb())
 
 # ---------- Найближча пара ----------
 @router.message(Command("next"))
@@ -194,7 +193,7 @@ async def next_lesson(message: Message):
     async with sm() as s:
         u = await s.scalar(select(User).where(User.user_id == message.from_user.id))
         if not u or (u.role == "student" and not u.group_id) or (u.role == "teacher" and not u.teacher_id):
-            await message.answer("Немає налаштованої групи/викладача. Натисніть /start.")
+            await message.answer("Немає налаштованої групи/викладача. Натисніть /start.", reply_markup=main_menu_kb())
             return
 
         rows_today = await events_for_user_day(s, u, today)
@@ -206,12 +205,13 @@ async def next_lesson(message: Message):
 
         next_ev = next((e for e in rows_today if is_future(e)), None)
         if not next_ev:
-            rows_future = await events_for_user_range(s, u, today, today.replace(day=today.day + 14))
+            # шукаємо вперед до 14 днів
+            rows_future = await events_for_user_range(s, u, today, today + timedelta(days=14))
             if rows_future:
                 next_ev = rows_future[0]
 
         if not next_ev:
-            await message.answer("Найближчих пар не знайдено.")
+            await message.answer("Найближчих пар не знайдено.", reply_markup=main_menu_kb())
             return
 
         b = EntityBuilder()
@@ -242,12 +242,49 @@ async def next_lesson(message: Message):
         b.add(f"{t} — ").add_bold(subj).add(f"{lt}{room}{extra}{zoom_line}")
 
     text, entities = b.build()
-    await message.answer(text, entities=entities)
+    await message.answer(text, entities=entities, reply_markup=main_menu_kb())
+
+
+# ---------- Обробка текстових кнопок Reply-клавіатури ----------
+@router.message(F.text == BTN_TODAY)
+async def btn_today(message: Message):
+    await _send_day(message, 0)
+
+@router.message(F.text == BTN_TOMORROW)
+async def btn_tomorrow(message: Message):
+    await _send_day(message, 1)
+
+@router.message(F.text == BTN_WEEK)
+async def btn_week(message: Message):
+    await week(message)
+
+@router.message(F.text == BTN_NEXT)
+async def btn_next(message: Message):
+    await next_lesson(message)
+
+@router.message(F.text == BTN_HELP)
+async def btn_help(message: Message):
+    await help_cmd(message)
+
+@router.message(F.text == BTN_SETTINGS)
+async def btn_settings(message: Message, state: FSMContext):
+    # Ліниво імпортуємо, щоб не створювати циклічних імпортів на рівні модулів
+    from handlers.onboarding import start_cmd
+    await start_cmd(message, state)
+
 
 # ---------- Адмін-команда: Zoom ----------
+# (без змін, виніс лише імпорти keyboards вище)
+from aiogram.fsm.state import State, StatesGroup
+
 class ZoomAdd(StatesGroup):
     teacher = State()
     link = State()
+
+# ... ДАЛІ — увесь блок addzoom як у вашій версії ...
+# Я залишаю без змін, щоб не переривати поточну логіку.
+# Якщо треба — скажіть, я скопіюю сюди повністю вашу актуальну реалізацію addzoom.
+
 
 @router.message(Command("addzoom", "setzoom"))
 async def addzoom_entry(message: Message, state: FSMContext):

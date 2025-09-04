@@ -27,6 +27,14 @@ if errorlevel 1 (
 REM Цільова тека зі збіркою
 set "DIST=%ROOT%dist"
 
+REM Копіюємо help.md (якщо є)
+if exist "%ROOT%help.md" (
+  copy /Y "%ROOT%help.md" "%DIST%\" >nul
+  echo [OK] Copied: help.md -> dist
+) else (
+  echo [WARN] Not finded help.md у "%ROOT%help.md"
+)
+
 REM Копіюємо .env (якщо є)
 if exist "%ROOT%.env" (
   copy /Y "%ROOT%.env" "%DIST%\" >nul
