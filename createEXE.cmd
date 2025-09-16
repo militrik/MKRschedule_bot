@@ -13,7 +13,7 @@ set "PY=%ROOT%.venv\Scripts\python.exe"
 REM Збірка EXE
 "%PY%" -m PyInstaller ^
   --noconsole --onefile ^
-  --name KRNUscheduler_bot ^
+  --name MKRschedule_bot ^
   --hidden-import aiosqlite ^
   --icon "%ROOT%bot.ico" ^
   "%ROOT%app.py"
@@ -51,6 +51,6 @@ if exist "%ROOT%bot.db" (
   echo [WARN] Not finded bot.db у "%ROOT%bot.db"
 )
 
-echo [OK] Done: "%DIST%\KRNUscheduler_bot.exe"
+echo [OK] Done: "%DIST%\MKRschedule_bot.exe"
 popd
 exit /b 0

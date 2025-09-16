@@ -281,11 +281,6 @@ class ZoomAdd(StatesGroup):
     teacher = State()
     link = State()
 
-# ... ДАЛІ — увесь блок addzoom як у вашій версії ...
-# Я залишаю без змін, щоб не переривати поточну логіку.
-# Якщо треба — скажіть, я скопіюю сюди повністю вашу актуальну реалізацію addzoom.
-
-
 @router.message(Command("addzoom", "setzoom"))
 async def addzoom_entry(message: Message, state: FSMContext):
     sm = get_sessionmaker()
