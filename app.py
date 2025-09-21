@@ -52,7 +52,7 @@ async def _setup_bot_commands(bot: Bot):
         BotCommand(command="help", description="ℹ️ Довідка"),
     ]
     await bot.set_my_commands(cmds, scope=BotCommandScopeAllPrivateChats(), language_code="uk")
-    await bot.set_my_commands(cmds, scope=BotCommandScopeAllPrivateChats())
+    #await bot.set_my_commands(cmds, scope=BotCommandScopeAllPrivateChats())
 
 
 async def main():
@@ -65,6 +65,7 @@ async def main():
     await create_all(models)
 
     bot = Bot(token=cfg.bot_token, default=DefaultBotProperties(parse_mode=None))
+    await bot.delete_webhook(drop_pending_updates=True)
     dp = Dispatcher(storage=MemoryStorage())
 
     dp.include_router(onboarding.router)
