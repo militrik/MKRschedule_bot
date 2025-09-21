@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/krnu_schedule_bot.iml" filepath="$PROJECT_DIR$/.idea/krnu_schedule_bot.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/MKRschedule_bot.iml" filepath="$PROJECT_DIR$/.idea/MKRschedule_bot.iml" />
     </modules>
   </component>
 </project>
