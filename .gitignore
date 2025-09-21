@@ -1,3 +1,4 @@
 /build/
 .env
 bot.db
+__pycache__
