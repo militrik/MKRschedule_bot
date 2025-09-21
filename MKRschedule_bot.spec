@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['C:\\Users\\user\\Desktop\\MKRschedule_bot\\app.py'],
+    ['.\\app.py'],
     pathex=[],
     binaries=[],
     datas=[],
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['C:\\Users\\user\\Desktop\\MKRschedule_bot\\bot.ico'],
+    icon=['.\\bot.ico'],
 )

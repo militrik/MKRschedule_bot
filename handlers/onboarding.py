@@ -4,6 +4,8 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
+import re
+from urllib.parse import urlparse
 
 from db import get_sessionmaker
 from models import User, Teacher, TimetableEvent
@@ -18,7 +20,7 @@ from repositories import (
     upsert_faculties, upsert_groups, upsert_chairs, upsert_teachers,
     sync_events_for_group, sync_events_for_teacher
 )
-from keyboards import paginated_kb, main_menu_kb
+from keyboards import paginated_kb, main_menu_kb, BTN_SETTINGS
 from utils.diag import log
 
 router = Router(name="onboarding")
@@ -66,9 +68,50 @@ def _page_clamp(total: int, page: int, per_page: int) -> int:
 @router.message(Command("start"))
 async def start_cmd(message: Message, state: FSMContext):
     await state.clear()
-    # Було 2 однакових повідомлення — залишаємо ОДНЕ з inline-вибором ролі
+    # Привітання з назвою ЗВО (беремо з головної сторінки BASE_URL)
+    cfg = Config.load()
+    name = await _get_institution_name(cfg)
+    if name:
+        await message.answer(f"Вітаємо у розкладі «{name}»!")
+    # Далі — вибір ролі
     await message.answer("Будь ласка, оберіть роль:", reply_markup=role_keyboard())
     await state.set_state(StartFSM.role)
+
+
+@router.message(F.text == BTN_SETTINGS)
+async def settings_btn(message: Message, state: FSMContext):
+    """Кнопка 'Налаштування' повторює сценарій /start."""
+    return await start_cmd(message, state)
+
+
+# --------- helpers: institution name ----------
+async def _get_institution_name(cfg: Config) -> str:
+    """Пробуємо витягти назву ЗВО з головної сторінки; фолбек — хост з BASE_URL."""
+    try:
+        async with SourceClient(cfg) as sc:
+            html = await sc.get_home()
+    except Exception:
+        html = ""
+
+    name = ""
+    if html:
+        # 1) Спроба зчитати з елемента з класом, що містить 'header'
+        m = re.search(r'<div[^>]*class="[^"]*\bheader\b[^"]*"[^>]*>(.*?)</div>', html, re.I | re.S)
+        if m:
+            inner = re.sub(r'<[^>]+>', '', m.group(1))
+            name = re.sub(r'\s+', ' ', inner).strip()
+        # 2) Запасний варіант — тег <title>
+        if not name:
+            m = re.search(r'<title[^>]*>(.*?)</title>', html, re.I | re.S)
+            if m:
+                inner = re.sub(r'<[^>]+>', '', m.group(1))
+                name = re.sub(r'\s+', ' ', inner).strip()
+
+    # 3) Фолбек — хост із URL
+    if not name:
+        host = urlparse(cfg.base_url).hostname or cfg.base_url
+        name = host
+    return name
 
 
 @router.callback_query(StartFSM.role, F.data.startswith("role:"))

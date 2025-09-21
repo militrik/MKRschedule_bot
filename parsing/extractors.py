@@ -315,3 +315,19 @@ def parse_timetable_teacher(
             "source_hash": None,
             "raw_html": str(d),
         }
+# def _normalize_ws(text: str) -> str:
+#     return re.sub(r"\s+", " ", text or "").strip()
+#
+#
+# def extract_institution_name(html: str) -> str:
+#     """
+#     Витягає назву закладу з головної сторінки.
+#     Цілиться в <div class="header ...">КрНУ</div>, але залишаємося толерантними до зайвих пробілів.
+#     Повертає чистий рядок або порожній, якщо не знайшли.
+#     """
+#     soup = BeautifulSoup(html, "lxml")
+#     node = soup.select_one("div.header")
+#     if not node:
+#         # перестраховка: деякі шаблони іноді кладуть h1/h2 в топбар
+#         node = soup.select_one("nav .header") or soup.select_one(".header")
+#     return _normalize_ws(node.get_text()) if node else ""

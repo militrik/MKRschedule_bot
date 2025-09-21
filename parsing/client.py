@@ -99,6 +99,17 @@ class SourceClient:
         write_blob("teacher_start_auto", r.text)
         return r.text
 
+    # ---------------- HOME ----------------
+    async def get_home(self) -> str:
+        """Головна сторінка BASE_URL — використовується для витягання назви ЗВО."""
+        url = f"{self.cfg.base_url}"
+        r = await self._client.get(url)
+        r.raise_for_status()
+        self._last_url = str(r.request.url)
+        self._extract_and_store_csrf(r.text)
+        write_blob("home", r.text)
+        return r.text
+
     # ---------------- STUDENT ----------------
     async def get_start(self) -> str:
         url = f"{self.cfg.base_url}/time-table/group"

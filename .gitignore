@@ -2,3 +2,4 @@
 .env
 bot.db
 __pycache__
+.zip

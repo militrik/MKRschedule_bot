@@ -1,5 +1,6 @@
 import asyncio
 import os
+import logging
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
@@ -79,7 +80,26 @@ async def main():
     bs.start()
 
     print("Bot started.")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        # Нормальне завершення: Ctrl+C, SIGTERM або скасування тасків поллінга
+        logging.info("Shutdown requested, stopping gracefully...")
+    finally:
+        # Акуратно закриваємо HTTP-сесію бота
+        try:
+            await bot.session.close()
+        except Exception:
+            pass
+        # Якщо у вашого планувальника є метод зупинки — зупиняємо
+        try:
+            if hasattr(bs, "stop"):
+                bs.stop()
+            elif hasattr(bs, "shutdown"):
+                bs.shutdown()
+        except Exception:
+            pass
+
 
 if __name__ == "__main__":
     asyncio.run(main())
