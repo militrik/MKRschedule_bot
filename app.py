@@ -65,7 +65,7 @@ async def main():
     init_engine(cfg.database_url)
     await create_all(models)
 
-    bot = Bot(token=cfg.bot_token, default=DefaultBotProperties(parse_mode=None))
+    bot = Bot(token=cfg.bot_token, default=DefaultBotProperties(parse_mode=None, link_preview_is_disabled=True))
     await bot.delete_webhook(drop_pending_updates=True)
     dp = Dispatcher(storage=MemoryStorage())
 

@@ -117,7 +117,7 @@ async def _send_day(message: Message, day_offset: int):
                     extra += f"\nВикл.: {teacher}"
 
             zoom = await zoom_for_event(s, e)
-            zoom_line = f"\nZoom: {zoom}" if zoom else ""
+            zoom_line = f"\n📹Zoom: {zoom}" if zoom else ""
             b.add(f"• {t} — ").add_bold(subj).add(f"{lt}{room}{extra}{zoom_line}").newline()
 
     text, entities = b.build()
@@ -176,7 +176,7 @@ async def week(message: Message):
                         extra += f"\n   Викл.: {teacher}"
 
                 zoom = await zoom_for_event(s, e)
-                zoom_line = f"\n   Zoom: {zoom}" if zoom else ""
+                zoom_line = f"\n   📹Zoom: {zoom}" if zoom else ""
                 b.add(f"• {t} — ").add_bold(subj).add(f"{lt}{room}{extra}{zoom_line}").newline()
 
     text, entities = b.build()
@@ -236,7 +236,7 @@ async def next_lesson(message: Message):
                 extra += f"\nВикл.: {teacher}"
 
         zoom = await zoom_for_event(s, next_ev)
-        zoom_line = f"\nZoom: {zoom}" if zoom else ""
+        zoom_line = f"\n📹Zoom: {zoom}" if zoom else ""
 
         b.add(f"Найближча пара — {date_str}\n")
         b.add(f"{t} — ").add_bold(subj).add(f"{lt}{room}{extra}{zoom_line}")

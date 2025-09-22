@@ -300,7 +300,7 @@ class BotScheduler:
                 extra += f"\nВикл.: {teacher}"
 
         t = f"{e.time_start.strftime('%H:%M')}" if e.time_start else f"пара №{e.lesson_number}"
-        zoom_line = f"\nZoom: {zoom_url}" if zoom_url else ""
+        zoom_line = f"\n📹Zoom: {zoom_url}" if zoom_url else ""
 
         b = EntityBuilder()
         b.add(f"За {minutes} хвилин почнеться заняття з ").add_bold(subj).add(f" о {t}{room}.{extra}{zoom_line}{lt}")

@@ -31,6 +31,7 @@ class SourceClient:
         self.cfg = cfg
         self._client: httpx.AsyncClient | None = None
         self._csrf: str | None = None
+        self._csrf_name: str = "_csrf-frontend"  # dynamic, parsed from form
         self._last_url: str | None = None
 
     async def __aenter__(self):
@@ -56,16 +57,21 @@ class SourceClient:
 
     # ---------------- CSRF utils ----------------
     def _extract_and_store_csrf(self, html: str) -> None:
-        m = re.search(r'name="_csrf-frontend"\s+value="([^"]+)"', html)
-        if not m:
-            m = re.search(r'name="csrf-token"\s+content="([^"]+)"', html)
+        # Find hidden input whose name contains 'csrf', else meta csrf-token
+        m = re.search(r'<input[^>]*name=["\']([^"\']*csrf[^"\']*)["\'][^>]*value=["\']([^"\']+)["\']', html, re.I)
         if m:
+            self._csrf_name = m.group(1)
+            self._csrf = m.group(2)
+            return
+        m = re.search(r'name="csrf-token"\s+content="([^"]+)"', html, re.I)
+        if m:
+            # Fallback: header-only token; keep last known csrf_name (default '_csrf-frontend')
             self._csrf = m.group(1)
 
     def _inject_csrf(self, data: dict) -> dict:
         if self._csrf:
             d = dict(data)
-            d["_csrf-frontend"] = self._csrf
+            d[self._csrf_name] = self._csrf
             return d
         return data
 
@@ -78,6 +84,9 @@ class SourceClient:
         if ajax:
             h["X-Requested-With"] = "XMLHttpRequest"
         return h
+
+    def _contains_time_table(self, html: str) -> bool:
+        return bool(re.search(r'id=["\']timeTable["\']', html, re.I))
 
     async def _ensure_group_session(self) -> str:
         """Гарантовано отримати куки+CSRF для сторінки груп перед POST."""
@@ -234,12 +243,28 @@ class SourceClient:
         }
         data = self._inject_csrf(base_data)
 
+        # 1) Основний шлях — AJAX POST (як у фронтенді)
         r = await self._client.post(url, data=data, headers=self._csrf_headers(ajax=True))
-        r.raise_for_status()
         self._last_url = str(r.request.url)
         self._extract_and_store_csrf(r.text)
         write_blob("student_filter_post", r.text)
-        return r.text
+        if r.status_code == 200 and self._contains_time_table(r.text):
+            return r.text
+
+        # 2) Альтернатива — звичайний POST без X-Requested-With
+        r2 = await self._client.post(url, data=data, headers=self._csrf_headers(ajax=False))
+        self._last_url = str(r2.request.url)
+        self._extract_and_store_csrf(r2.text)
+        write_blob("student_filter_post_fallback", r2.text)
+        if r2.status_code == 200 and self._contains_time_table(r2.text):
+            return r2.text
+
+        # 3) Резерв — GET з query (деякі інсталяції приймають і так)
+        r3 = await self._client.get(url, params=base_data, headers=self._csrf_headers())
+        self._last_url = str(r3.request.url)
+        self._extract_and_store_csrf(r3.text)
+        write_blob("student_filter_get_fallback", r3.text)
+        return r3.text
 
     # ---------------- TEACHER ----------------
     async def get_teacher_start(self) -> str:
@@ -257,7 +282,7 @@ class SourceClient:
         dstart: date | None = None,
         dend: date | None = None,
     ) -> str:
-        """Після вибору КАФЕДРИ — список викладачів. Спочатку GET для сесії."""
+        """Після вибору кафедри — форма з викладачами."""
         await self._ensure_teacher_session()
 
         if dstart is None:
@@ -265,15 +290,15 @@ class SourceClient:
         if dend is None:
             dend = dstart + timedelta(days=28)
 
+        url = f"{self.cfg.base_url}/time-table/teacher?type=0"
         base_data = {
             "TimeTableForm[type]": "0",
             "TimeTableForm[chairId]": str(chair_id),
-            "TimeTableForm[teacherId]": "",   # reset
+            "TimeTableForm[teacherId]": "",    # reset
             "TimeTableForm[dateStart]": dstart.strftime("%d.%m.%Y"),
             "TimeTableForm[dateEnd]": dend.strftime("%d.%m.%Y"),
         }
         data = self._inject_csrf(base_data)
-        url = f"{self.cfg.base_url}/time-table/teacher?type=0"
 
         r = await self._client.post(url, data=data, headers=self._csrf_headers(ajax=True))
         self._last_url = str(r.request.url)
@@ -295,15 +320,15 @@ class SourceClient:
         dstart: date | None = None,
         dend: date | None = None,
     ) -> str:
-        """Фінальний запит — розклад викладача. Також гарантуємо сесію GET'ом."""
+        """Фінальний запит — розклад викладача."""
         await self._ensure_teacher_session()
 
-        url = f"{self.cfg.base_url}/time-table/teacher?type=0"
         if dstart is None:
             dstart = date.today()
         if dend is None:
             dend = dstart + timedelta(days=28)
 
+        url = f"{self.cfg.base_url}/time-table/teacher?type=0"
         base_data = {
             "TimeTableForm[type]": "0",
             "TimeTableForm[chairId]": str(chair_id),
