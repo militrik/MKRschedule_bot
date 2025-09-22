@@ -19,6 +19,10 @@
 - `/week` — розклад на тиждень
 - `/help` — перегляд цієї довідки
 
+## Команди адміністратора
+
+- `/addzoom` — додає посилання на Zoom чи інший засіб для організації відеоконференцій
+
 ## Технології
 
 - Python 3
@@ -38,26 +42,30 @@
      ```bash
      source .venv/bin/activate
      ```
-3. Запустіть бота:
+3. Налаштуйте токен Telegram та дані БД у `.env` файлі.
+4. Запустіть бота:
    ```bash
    python app.py
    ```
-4. Налаштуйте токен Telegram та дані БД у `.env` файлі.
+
 
 #### Альтернативний запуск
-
-- Ви можете запустити готовий скомпільований файл `exe` з теки `dist` (Windows):
+- Запустити скрипт автоматичного налаштування проєкту (Windows):
+   ```bash
+   powershell.exe -ExecutionPolicy Bypass -File setup-env.ps1
+   ```
+- Ви можете виконати скрипт компіляції та запустити готовий скомпільований файл `exe` з теки `dist` (Windows):
   ```bash
-  dist\KRNUscheduler_bot.exe
+  powershell.exe -ExecutionPolicy Bypass -File createEXE.ps1
   ```
-  або подвійним кліком по файлу.
 
 ## Ліцензія
 
-Цей проект поширюється під ліцензією MIT.
+Цей проєкт поширюється під ліцензією MIT.
 
 ---
 
 ### Контакти
 
-- GitHub: [pfkbi](https://github.com/pfkbi)
+- [GitHub](https://github.com/militrik)
+- [E-mail](mailto:militrik@gmail.com)
